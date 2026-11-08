@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::file_picker::{FFFMode, FilePicker, FilePickerIgnoreOptions};
 use crate::index::snapshot::LayerSnapshot;
 use crate::index::{build_bigram_index, sniff_binary_for_non_indexable};
-use crate::parallelism::indexing_pool;
+use crate::parallelism::BACKGROUND_THREAD_POOL;
 use crate::shared::{SharedFilePicker, SharedFrecency};
 use crate::types::ContentCacheBudget;
 use crate::watch::{BackgroundWatcher, WatcherOptions};
@@ -165,7 +165,7 @@ impl ScanJob {
         }
     }
 
-    /// Run the job on the indexing pool. Returns immediately.
+    /// Run the job on `BACKGROUND_THREAD_POOL`. Returns immediately.
     ///
     /// Routed through the pool — and not a fresh `std::thread::spawn` — so the
     /// orchestrator inherits rayon's QoS pin (USER_INITIATED). Without that
@@ -175,7 +175,7 @@ impl ScanJob {
     /// ~800 ms walk into ~3 s.
     pub fn spawn(self) {
         let span = self.trace_span.clone();
-        indexing_pool(self.mode).spawn(move || {
+        BACKGROUND_THREAD_POOL.spawn(move || {
             let _g = span.enter();
             self.run();
         });
@@ -301,7 +301,7 @@ impl ScanJob {
         if !signals.cancelled.load(Ordering::Acquire)
             && let Some(snap) = snapshot.as_ref()
         {
-            Self::run_post_scan(&shared_picker, &signals, &config, mode, snap, &known_text);
+            Self::run_post_scan(&shared_picker, &signals, &config, snap, &known_text);
         }
 
         drop(snapshot); // SNAPSHOT SHOULD NOT BE USED AFTER THIS POINT
@@ -364,7 +364,6 @@ impl ScanJob {
         shared_picker: &SharedFilePicker,
         signals: &ScanSignals,
         config: &ScanConfig,
-        mode: FFFMode,
         unsafe_snapshot: &crate::file_picker::PostScanUnsafeSnapshot,
         known_text: &[u64],
     ) {
@@ -385,9 +384,7 @@ impl ScanJob {
         if config.content_indexing {
             let indexable_count = unsafe_snapshot.indexable_count.min(files.len());
             let (indexable_files, non_indexable_files) = files.split_at(indexable_count);
-            let pool = indexing_pool(mode);
-            let index =
-                build_bigram_index(indexable_files, &unsafe_snapshot.base_path, arena, pool);
+            let index = build_bigram_index(indexable_files, &unsafe_snapshot.base_path, arena);
 
             // A root change may have replaced the picker while this index was building.
             if let Ok(mut guard) = shared_picker.write()
@@ -397,8 +394,8 @@ impl ScanJob {
             {
                 picker.set_bigram_index(index);
             }
-            crate::index::release_thread_buffers(pool);
-            crate::file_picker::hint_allocator_collect(pool);
+            crate::index::release_thread_buffers();
+            crate::file_picker::hint_allocator_collect();
 
             // Bigram only sniffs files <= MAX_INDEXABLE_FILE_SIZE; large
             // unknown-extension binaries slip past it and would otherwise be
@@ -611,14 +608,7 @@ mod tests {
             enable_fs_root_scanning: false,
             enable_home_dir_scanning: false,
         };
-        ScanJob::run_post_scan(
-            &shared,
-            &signals,
-            &config,
-            FFFMode::default(),
-            &snapshot,
-            &[],
-        );
+        ScanJob::run_post_scan(&shared, &signals, &config, &snapshot, &[]);
         drop(snapshot);
         drop(old);
 
