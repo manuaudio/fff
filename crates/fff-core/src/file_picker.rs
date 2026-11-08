@@ -65,7 +65,7 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 use tracing::{Level, debug, error, info, warn};
 
-use crate::parallelism::{SEARCH_THREAD_POOL, indexing_pool};
+use crate::parallelism::{BACKGROUND_THREAD_POOL, SEARCH_THREAD_POOL};
 
 mod layer_ops;
 
@@ -2356,8 +2356,7 @@ impl FileSync {
                 "Linked git worktree, sharing the main checkout history"
             );
         }
-        let pool = indexing_pool(mode);
-        let bg_threads = pool.current_num_threads();
+        let bg_threads = BACKGROUND_THREAD_POOL.current_num_threads();
 
         let WalkOutput {
             dirs: mut walked_dirs,
@@ -2375,7 +2374,7 @@ impl FileSync {
         let ignore_rules = ignore_rules.map(Arc::new);
 
         // group walked dirs and files with a dir part to the same order
-        pool.install(|| {
+        BACKGROUND_THREAD_POOL.install(|| {
             rayon::join(
                 || {
                     pairs.par_sort_unstable_by(|(a, path_a), (b, path_b)| {
@@ -2407,7 +2406,7 @@ impl FileSync {
         if let Some(frecency) = frecency.as_ref() {
             let dirs_ref = &dirs;
             let shared_base = shared_base.as_deref();
-            pool.install(|| {
+            BACKGROUND_THREAD_POOL.install(|| {
                 files.par_iter_mut().for_each_init(
                     || frecency.reader(),
                     |reader, file| {
@@ -2431,7 +2430,7 @@ impl FileSync {
         files.extend(unindexable);
 
         // Ask the allocator to return freed pages to the OS.
-        hint_allocator_collect(pool);
+        hint_allocator_collect();
 
         let file_item_size = std::mem::size_of::<FileItem>();
         let files_vec_bytes = files.len() * file_item_size;
@@ -2752,12 +2751,13 @@ pub extern "C" fn tune_mimalloc() {
 /// Ask the global allocator to return freed pages to the OS.
 /// Enabled via the `mimalloc-collect` feature (set by fff-nvim).
 /// No-op when the feature is off (tests, system allocator).
-pub(crate) fn hint_allocator_collect(pool: &rayon::ThreadPool) {
-    #[cfg(not(feature = "mimalloc-collect"))]
-    let _ = pool;
+pub(crate) fn hint_allocator_collect() {
     #[cfg(feature = "mimalloc-collect")]
     {
-        pool.broadcast(|_| unsafe { libmimalloc_sys::mi_collect(true) });
+        // Collect BACKGROUND_THREAD_POOL workers — that's where the bigram
+        // builder allocated memory. `rayon::broadcast` would target the global
+        // pool, which is the wrong set of threads.
+        BACKGROUND_THREAD_POOL.broadcast(|_| unsafe { libmimalloc_sys::mi_collect(true) });
 
         // Main thread too.
         unsafe { libmimalloc_sys::mi_collect(true) };

@@ -3,7 +3,7 @@ use crate::error::Error;
 use crate::file_picker::{FFFMode, FilePickerIgnoreOptions};
 use crate::git::GitDiscovery;
 use crate::git_status_worker::GitStatusWorker;
-use crate::parallelism::indexing_pool;
+use crate::parallelism::BACKGROUND_THREAD_POOL;
 use crate::rescan_stats::RescanReason;
 use crate::shared::{SharedFilePicker, SharedFrecency};
 use crate::sort_buffer::sort_with_buffer;
@@ -205,7 +205,6 @@ impl BackgroundWatcher {
             // our own grep calls and preview window rendering
             .with_event_kinds(EventKindMask::CORE);
 
-        let mode = options.mode;
         let git_workdir_for_handler = git.as_ref().map(|git| git.workdir.clone());
         let base_path_for_handler = base_path.clone();
         let shared_picker_for_watching = shared_picker.clone();
@@ -274,7 +273,7 @@ impl BackgroundWatcher {
                 });
             }
             // The debouncer keeps sorted roots; append in order and register off-lock.
-            indexing_pool(mode).install(|| {
+            BACKGROUND_THREAD_POOL.install(|| {
                 directories.par_sort_unstable_by(|left, right| left.as_path().cmp(right.as_path()));
             });
             let mut directories = directories.into_iter();
