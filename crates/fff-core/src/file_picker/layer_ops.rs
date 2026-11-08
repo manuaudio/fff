@@ -379,14 +379,15 @@ impl FileSync {
 
     // Moves every explicit overlay of `old` onto this sync. The session layer
     // is left behind: a rescan re-discovers its files.
-    pub(super) fn adopt_overlays(&mut self, old: FileSync) {
+    pub(super) fn adopt_overlays(&mut self, old: &mut FileSync) {
         let top = old.layers.top_id();
         let exports: Vec<Option<LayerExport>> = (1..=top)
             .map(|id| (id > SESSION_LAYER).then(|| old.export_layer_parts(id))?)
             .collect();
-        // Consuming the stack leaves each arena uniquely owned, so a layer with
+        // Taking the stack leaves each arena uniquely owned, so a layer with
         // foreign dirs reopens it in place instead of copying it.
-        let stores = old.layers.into_stores();
+        let base_only = LayerStack::new(old.base_count, old.base_dirs_count);
+        let stores = std::mem::replace(&mut old.layers, base_only).into_stores();
         for (export, store) in exports.into_iter().zip(stores) {
             let Some(export) = export.filter(|export| !export.is_empty()) else {
                 continue;
@@ -653,7 +654,7 @@ impl FilePicker {
         let mut sync = FileSync::from_snapshot(
             snapshot,
             &self.base_path,
-            FileSync::discover_git(&self.base_path),
+            FileSync::discover_git(&self.base_path, self.ignore_options.disable_git),
             frecency,
             self.mode,
         );
